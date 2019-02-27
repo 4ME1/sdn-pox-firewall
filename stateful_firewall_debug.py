@@ -196,8 +196,9 @@ class Firewall(object):
 
 class TCPConnTrack(object):
 
-	def __init__(self,fw_obj,pkt):
-		self.fw= fw_obj
+	def __init__(self,cap_obj,pkt):
+		print ("[%s][%d][%s]" % (sys._getframe().f_code.co_filename,sys._getframe().f_lineno,sys._getframe().f_code.co_name))
+		self.cap= cap_obj
 		self.pkt = pkt
 		self.set_flags()
 
@@ -207,13 +208,6 @@ class TCPConnTrack(object):
         	"""
 		ip_packet = self.pkt.payload	
 		tcp_packet = ip_packet.payload
-		"""
-		INFO:packet:Truncated TCP option; incomplete packet
-		"""
-		if tcp_packet is None:
-			return
-	
-		print "tcp_packet.flags:",tcp_packet.flags
 		decode = '{0:09b}'.format(tcp_packet.flags)
 		print "decode:",decode
 		print "seq:",tcp_packet.seq
@@ -228,65 +222,97 @@ class TCPConnTrack(object):
 		self.CWR = decode[-8]
 		self.NS  = decode[-9]
 	
-		#flags = [str(self.NS),str(self.CWR),str(self.ECE),str(self.URG),str(self.ACK),str(self.PSH),str(self.RST),str(self.SYN),str(self.FIN)]
-		#print flags
+		flags = [str(self.NS),str(self.CWR),str(self.ECE),str(self.URG),str(self.ACK),str(self.PSH),str(self.RST),str(self.SYN),str(self.FIN)]
+		print flags
 
 	def track_network(self): 
         	"""
         	Tracks inside and outside network traffic
         	"""
-		if self.fw.check_IPinside(self.pkt.payload.srcip):
-			allow_resend = self.track_inside_network()
+		if self.cap.check_IPinside(self.pkt.payload.srcip):
+			self.track_inside_network()
 		else:
-			allow_resend = self.track_outside_network()
-
-		if True == allow_resend:
-			self.fw.resend_packet(self.pkt)
+			self.track_outside_network()
 
 	def track_inside_network(self): 
+		print ("[%s][%d][%s]" % (sys._getframe().f_code.co_filename,sys._getframe().f_lineno,sys._getframe().f_code.co_name))
 		ip_packet = self.pkt.payload	
 		tcp_packet = ip_packet.payload
-	
-		if True == self.fw.check_policy_l3(ip_packet.srcip,ip_packet.dstip):
-			print "This packet matched the rule and dropped !!"
-			return False
-
-		if True == self.fw.check_policy_l4(ip_packet.srcip,ip_packet.dstip,tcp_packet.dstport):
-			print "This packet matched the rule and dropped !!"
-			return False
-
-		key = (str(ip_packet.srcip),str(ip_packet.dstip),int(tcp_packet.seq))
+		fields = [str(ip_packet.srcip),str(tcp_packet.srcport),str(ip_packet.dstip),str(tcp_packet.dstport)]
+		print fields
+		key = (ip_packet.srcip,tcp_packet.srcport,ip_packet.dstip,tcp_packet.dstport)
+		
 		print "key:",key
-
-		if key in self.fw.ip_seq_table:
-			print "key in the table"
-			"""
-			TCP SYN flood 
-			"""	
-			if self.fw.ip_seq_table[key][0] < 100 and self.SYN:
-				self.fw.ip_seq_table[key][0] +=1
-				print "TCP SYN flood counter:",self.fw.ip_seq_table[key][0]
+		print "flow_table:",self.cap.flow_table
+	
+		if key in self.cap.flow_table:
+			print "key in flow_table:",self.cap.flow_table
+			if self.cap.flow_table[key][:2] == [1,"out"] and self.SYN and self.ACK:
+				self.cap.flow_table[key][0] += 1
+				self.cap.flow_table[key][1] = "in"
+				print "TCP Packet SYN ACK from inside"
 				return True
-
-			if self.fw.ip_seq_table[key][0] >= 100 and self.SYN:
-				print "TCP SYN flood counter:",self.fw.ip_seq_table[key][0]
-				del self.fw.ip_seq_table[key]
-				print "TCP SYN flood attack detected!!!"
-				self.fw.update_policy_l3(ip_packet.srcip,ip_packet.dstip)
+			elif self.cap.flow_table[key][:2] == [2,"out"] and self.ACK:
+				self.cap.flow_table[key][0] += 1
+				self.cap.flow_table[key][1] += "in"
+				print "TCP Packet ACK from inside"
 				return True
+			elif self.cap.flow_table[key][2] < 100: #It's a check to prevent from DOS
+				self.cap.flow_table[key][2] += 1
+				return True
+			elif self.cap.flow_table[key][2] >= 100:
+				del self.cap.flow_table[key][2]
+				print "DOS attacks detected"
+				return False
+				
 		else:
-			"""
-			SEQ Counter
-			"""
-			print "key not in the table"
+			#First TCP packet
 			if self.SYN:
-				self.fw.ip_seq_table[key] = [1]
-				return True
-
+				print "self.SYN:",self.cap.flow_table
+				#[Numbers of packets, Traffic direction,DOS]
+				self.cap.flow_table[key] = [1,"in", 0]
+				print "First TCP Packet SYN from inside"	
+				return True	
 	
 	def track_outside_network(self): 
 		print ("[%s][%d][%s]" % (sys._getframe().f_code.co_filename,sys._getframe().f_lineno,sys._getframe().f_code.co_name))
+		ip_packet = self.pkt.payload	
+		tcp_packet = ip_packet.payload
+		#fields = [str(ip_packet.srcip),str(tcp_packet.srcport),str(ip_packet.dstip),str(tcp_packet.dstport)]
+		#print fields
+		key = (ip_packet.srcip,tcp_packet.srcport,ip_packet.dstip,tcp_packet.dstport)
 
+		print "key:",key
+		print "flow_table:",self.cap.flow_table
+
+		if key in self.cap.flow_table:
+			print "key in flow_table:",self.cap.flow_table
+			if self.cap.flow_table[key][:2] == [1,"in"] and self.SYN and self.ACK:
+				self.cap.flow_table[key][0] += 1	
+				self.cap.flow_table[key][1] = "out"
+				print "TCP Packet SYN ACK from outside"
+				return True
+			elif self.cap.flow_table[key][:2] == [2,"in"] and self.ACK:
+				self.cap.flow_table[key][0] += 1
+				self.cap.flow_table[key][1] += "out"
+				print "TCP Packet ACK from outside"
+				return True
+			elif self.cap.flow_table[key][2] < 100: #It's a check to prevent from DOS
+				self.cap.flow_table[key][2] += 1
+				return True
+			elif self.cap.flow_table[key][2] >= 100:
+				del self.cap.flow_table[key][2]
+				print "DOS attacks detected"
+				return False
+				
+		else:
+			#First TCP packet
+			if self.SYN:
+				print "self.SYN:",self.cap.flow_table
+				#[Numbers of packets, Traffic direction,DOS]
+				self.cap.flow_table[key] = [1,"out", 0]
+				print "First TCP Packet SYN from outside"	
+				return True
 
 class UDPConnTrack(object):
 
